@@ -1,361 +1,373 @@
-# 实习生培养计划 —— ARM CPU LLM 部署方向
+# 实习生培养计划 —— ARM CPU LLM 部署与推理调优
 
-> 项目载体：`cpu_model_deploy` — Qwen3.6-35B-A3B 在鲲鹏920上的离线部署
-> 周期：12 周 | 难度：L2→L4（能独立完成生产级部署 + 性能调优）
+> 项目载体：`cpu_model_deploy` — Qwen3.6-35B-A3B 在**鲲鹏920F**上的推理部署与调优
+> 周期：12 周 | 难度：L2→L4
 
 ---
 
-## 一、培养目标
+## 一、三大培养目标
 
-### L2（第1-4周）：能跑通
+### 🎯 目标 1：能在鲲鹏 920F 上跑通大模型
 
-- [ ] 理解 LLM 基础：Transformer、MoE、KV Cache 是什么
-- [ ] 理解量化：为什么模型从 70GB 变成 21GB
-- [ ] 能独立在 ARM 服务器上编译 llama.cpp
-- [ ] 能部署成功，跑通一次对话
+从零开始，在**鲲鹏 920F**（华为 7nm ARM 服务器芯片）上完成大模型的部署：
 
-### L3（第5-8周）：能优化
+- 理解 920F 的架构特点（64核 ARMv8.2、NEON SIMD、DDR4 内存通道拓扑）
+- 编译 llama.cpp，加载量化模型，跑通对话
+- 部署为稳定的 API 服务
 
-- [ ] 理解 ggml 架构：算子注册、图构建、dispatch
-- [ ] 能做性能 profiling 并指出瓶颈
-- [ ] 能选择最优的编译参数和运行参数
-- [ ] 能部署成 systemd 服务
+> 920F 是 920 系列的增强版本，主频更高（2.6GHz vs 2.0GHz），支持 DDR4-2933。推理瓶颈在内存带宽，920F 的 8 通道 DDR4 配置是关键约束。
 
-### L4（第9-12周）：能改
+### 🎯 目标 2：融合 Unigemm（鲲鹏数学库）做推理调优
 
-- [ ] 理解 attention 算子的接入方式
-- [ ] 能用 perf/mpirun/rocprof 等工具做细粒度性能分析
-- [ ] 能写 benchmark 脚本做 A/B 对比
-- [ ] 能做出优化决策并量化收益
+不只是跑通，而是**把华为官方的高性能计算库用上**：
+
+- 了解 **KML（Kunpeng Math Library）**，特别是其中的 **Unigemm**——鲲鹏上最优化过的通用矩阵乘法库
+- 将 llama.cpp/ggml 的默认矩阵乘法（`ggml_mul_mat`）替换或对齐到 Unigemm 内核
+- 量化收益，形成调优对比报告
+
+> Unigemm 是华为鲲鹏数学库（KML）的核心组件之一。它针对鲲鹏的 cache 层级和 NEON I8MM 指令做了深度调优。llama.cpp 里 `ggml_mul_mat` 占了推理时间的 60-70%，如果把这部分换成 Unigemm 的路由，收益会非常直接。
+
+### 🎯 目标 3：形成"推理调优 Agent 工作流"
+
+把经验固化为可复用的自动化流程——**用 LLM Agent 来自动做推理调优**：
+
+- Agent 自动跑 benchmark，搜集性能数据（tokens/s、每层延迟、cache miss、内存带宽）
+- Agent 自动调参（线程数、batch size、编译选项、系统参数）并 A/B 对比
+- 最终输出一份"最优配置推荐报告"
+
+> 人工调优的问题是：每次换个模型、换个量化、换个服务器，十几个参数排列组合，试一遍要好几天。这部分完全可以用 Agent 自动化。
 
 ---
 
 ## 二、阶段详细安排
 
-### Phase 1：基础认知 — 搞清楚你在部署什么（Week 1-2）
+### Phase 1：基础认知 — 搞清楚你在什么芯片上跑（Week 1-2）
 
-#### Week 1：LLM 基础
+#### Week 1：LLM 推理基础
 
 | 天数 | 内容 | 产出 |
 |------|------|------|
 | Day 1 | 读 [Transformer 论文](https://arxiv.org/abs/1706.03762)，理解自注意力机制 | 画出完整的 Transformer 结构图 |
 | Day 2 | 理解 Q、K、V 是什么，注意力计算 `softmax(QK^T / √d) V` | 手写伪代码实现 attention |
-| Day 3 | MoE（Mixture of Experts）：总参数 vs 激活参数的概念 | 解释 Qwen3.6-35B-A3B 的命名含义 |
+| Day 3 | MoE（Mixture of Experts）：总参数 vs 激活参数 | 解释 Qwen3.6-35B-A3B 的命名含义 |
 | Day 4 | KV Cache 是什么、为什么需要、怎么存储 | 画出 KV Cache 的生存周期 |
 | Day 5 | RoPE 位置编码、FFN、LayerNorm 概览 | 总结每个组件在推理中的角色 |
 
-**交付物：** 写一篇 1500 字以上的技术笔记，用你自己的话解释 LLM 结构。发到团队文档空间。
+**交付物：** 一篇技术笔记，用自己的话解释 LLM 推理流程（1500 字以上）。
 
-#### Week 2：推理与量化
+#### Week 2：鲲鹏 920F 与硬件基础
 
 | 天数 | 内容 | 产出 |
 |------|------|------|
-| Day 1 | 模型推理流程：Tokenization → Embedding → Layers → LM Head | 画流程图 |
-| Day 2 | 量化原理：FP16 → INT4，精度损失 vs 速度提升 | 解释 GGUF Q4_K_M 含义 |
-| Day 3 | MoE 量化特有问题：Expert Load Balance、激活 Expert 的选择 | 看 Qwen3 的 MOE 配置 |
-| Day 4 | 对比几种部署框架：llama.cpp vs Ollama vs vLLM | 列出对比表格 |
-| Day 5 | 阅读 `DEPLOY.md`，理解整个部署步骤 | 写一份"部署步骤流程图" |
+| Day 1 | 鲲鹏 920F 架构：ARMv8.2、64核、8通道 DDR4、cache 层级 | 画芯片架构图 |
+| Day 2 | NEON SIMD 基础：向量化、寄存器、指令集（I8MM、DOTPROD） | 读几个 NEON intrinsic 示例 |
+| Day 3 | 推理的瓶颈分析：为什么是内存带宽而不是算力 | 了解 roofline model |
+| Day 4 | 查看服务器信息：`lscpu`、`lstopo`、`dmidecode`、`numactl -H` | 提交硬件拓扑报告 |
+| Day 5 | 部署框架对比：llama.cpp vs Ollama vs vLLM on ARM | 列出对比表格 |
 
-**交付物：** 用你自己的机器（或 DevBox）跑通一个最小的 llama.cpp 推理（可以换小模型如 Qwen2.5-0.5B）。
+**交付物：** 一份"鲲鹏 920F 硬件拓扑 + 推理约束分析"报告。
 
 ---
 
-### Phase 2：动手部署 — 让模型跑起来（Week 3-4）
+### Phase 2：动手部署 — 跑通第一个模型（Week 3-4）
 
 #### Week 3：环境搭建与编译
 
 | 天数 | 内容 | 产出 |
 |------|------|------|
-| Day 1 | 登录鲲鹏服务器，检查环境（uname、cmake、gcc） | 提交环境检查报告 |
-| Day 2 | 编译 llama.cpp：从源码到二进制 | 记录编译过程和遇到的问题 |
-| Day 3 | 模型传输：scp/rsync 区别，大文件传输策略 | 测速并优化传输方案 |
-| Day 4 | 完整运行一次 `llama-cli` 交互式对话 | 截图 + 记录 tokens/s |
-| Day 5 | 理解 ggml 日志输出：NEON、BLAS、线程数各代表什么 | 写一篇文章解读启动日志 |
+| Day 1 | 登录服务器，检查环境 | 提交环境检查报告 |
+| Day 2 | 编译 llama.cpp（基础版） | 记录编译过程 |
+| Day 3 | 模型传输 + 完整跑通一次对话 | 截图 + tokens/s |
+| Day 4 | 理解 ggml 启动日志：NEON、BLAS、线程数 | 解读日志文章 |
+| Day 5 | `llama-cli --perf` 看每层耗时 | 标注 top3 瓶颈 |
 
-**交付物：** 部署跑通，记录基准性能数据。
+**交付物：** 部署跑通，记录基准性能。理解 attention 层和 FFN 层各自占比。
 
-#### Week 4：服务化部署
+#### Week 4：API 服务化部署
 
 | 天数 | 内容 | 产出 |
 |------|------|------|
-| Day 1 | 启动 `llama-server`，了解 OpenAI 兼容 API | 用 curl 成功调用一次 |
-| Day 2 | 用 Python 调用 API，写一个简单的聊天客户端 | 可运行的 chat.py |
-| Day 3 | 配置 systemd 服务、开机自启、日志查看 | systemd 配置文件和验证 |
-| Day 4 | 学习性能监控：top、htop、nvidia-smi（如有 GPU） | 记录负载数据 |
-| Day 5 | 复习前 4 周内容，写一篇 2000 字以上的实操总结 | 周报 + 总结文档 |
+| Day 1 | 启动 `llama-server`，理解 OpenAI API | curl 调用成功 |
+| Day 2 | Python 客户端 + 压力测试 | chat.py + 并发测试 |
+| Day 3 | systemd 服务 + 开机自启 | qwen3-api.service |
+| Day 4 | 日志管理 + 监控搭建 | 日志轮转 + 监控脚本 |
+| Day 5 | 阶段性总结 | 周报 + L2 考核 |
 
-**交付物：** 跑通 API 服务 + Python 客户端 + systemd 管理。完成 L2 阶段考核。
+**交付物：** API 服务 + Python 客户端 + systemd 管理。完成 **目标 1** 初步验收。
 
 ---
 
-### Phase 3：性能分析 — 找到你的瓶颈（Week 5-6）
+### Phase 3：Unigemm 与矩阵计算优化（Week 5-7）
 
-#### Week 5：Profiling 工具
-
-| 天数 | 内容 | 产出 |
-|------|------|------|
-| Day 1 | llama.cpp 自带的 `--perf` 标志：读每层耗时 | 解读 perf 输出，标出 top3 耗时层 |
-| Day 2 | Linux `perf` 工具：`perf stat`、`perf record`、`perf report` | 热力图分析 |
-| Day 3 | ARM 平台的 PMU 计数器：`perf stat -e cache-misses,cycles,instructions` | 找出 cache miss 瓶颈 |
-| Day 4 | 内存带宽测试：`dd`、`stream` benchmark | 确认是否是内存带宽瓶颈 |
-| Day 5 | 对比不同 `-t`（线程数）的性能曲线 | 画 "线程数 vs tokens/s" 曲线图 |
-
-**交付物：** 一份性能分析报告，指出当前部署的 top3 瓶颈。
-
-#### Week 6：编译优化实验
+#### Week 5：理解 ggml 的矩阵乘法体系
 
 | 天数 | 内容 | 产出 |
 |------|------|------|
-| Day 1 | 对比 `GGML_NATIVE=ON vs OFF` | 性能差异数据 |
-| Day 2 | 安装 OpenBLAS 并启用 `GGML_BLAS=ON` | 测速对比 |
-| Day 3 | 启用 `GGML_CPU_KLEIDIAI=ON`（ARM 优化内核） | 测速对比 |
-| Day 4 | 组合最优编译选项 | 提交"最优编译配置" |
-| Day 5 | LTO、静态链接等其他选项测试 | 完整对比表 |
+| Day 1 | ggml 数据结构：`ggml_tensor`、`ggml_context`、张量布局 | 画内存结构图 |
+| Day 2 | `ggml_mul_mat` 的 dispatch 链路：ops.cpp → arm 内核 | 画调用链路 |
+| Day 3 | 看 arm 内核源码：`ggml/src/ggml-cpu/arch/arm/` | 读代码写注释 |
+| Day 4 | 理解量化矩阵乘法：Q4_K_M 如何在乘法时反量化 | 反量化数据流图 |
+| Day 5 | 用 `--perf` 定位 `ggml_mul_mat` 在推理中的占比 | 时间占比报告 |
 
-**交付物：** 编译选项的 A/B 测试报告，给出最优编译方案。
+**交付物：** ggml 矩阵乘法体系的源码分析文档。
+
+#### Week 6：Unigemm（鲲鹏数学库 KML）学习
+
+| 天数 | 内容 | 产出 |
+|------|------|------|
+| Day 1 | 了解 KML 整体架构：Blas、Sparse、FFT、Unigemm | 功能概览表 |
+| Day 2 | 安装 KML 开发包：配置 yum 源，`yum install kml` | 安装成功 |
+| Day 3 | 读 Unigemm API 文档：矩阵布局、调用约定、数据类型 | API 摘要笔记 |
+| Day 4 | 写一个独立的 C 程序调用 Unigemm 做矩阵乘法并 benchmark | Unigemm vs 原生速度对比 |
+| Day 5 | 理解 Unigemm 的 I8MM 内核：为什么比通用实现快 | NEON I8MM 指令分析 |
+
+**交付物：** Unigemm 调用 demo + 独立 benchmark 数据。
+
+#### Week 7：Unigemm 接入 llama.cpp
+
+| 天数 | 内容 | 产出 |
+|------|------|------|
+| Day 1 | 设计接入方案：在 ggml 中加一个 backend，还是替换 dispatch | 方案设计文档 |
+| Day 2 | 实现方案：在 `ggml_mul_mat` dispatch 中加 Unigemm 路径 | 代码 diff |
+| Day 3 | 正确性验证：Unigemm 输出 vs 原生输出一致 | 数值误差报告 |
+| Day 4 | 性能对比：Unigemm vs 原生 NEON，不同批量大小 | 完整 A/B 对比表 |
+| Day 5 | 调优：tiling size、线程数、缓存对齐 | 最优参数配置 |
+
+**交付物：** 完成 **目标 2**——Unigemm 接入并量化收益。
 
 ---
 
-### Phase 4：系统级优化（Week 7-8）
+### Phase 4：系统级调优 + Agent 工作流（Week 8-10）
 
-#### Week 7：系统参数调优
-
-| 天数 | 内容 | 产出 |
-|------|------|------|
-| Day 1 | NUMA 架构理解 + `numactl` 命令 | 画出服务器的 NUMA 拓扑 |
-| Day 2 | 关 NUMA balancing + 绑核实验 | 性能提升数据 |
-| Day 3 | CPU governor + 频率 scaling 的影响 | 不同 governor 下的性能对比 |
-| Day 4 | HugePages + THP 实验 | 测试是否受益 |
-| Day 5 | `--mlock` 和 swap 倾向调优 | 内存压力测试 |
-
-**交付物：** 系统性优化脚本 + 效果对比报告。
-
-#### Week 8：运行参数调优
+#### Week 8：系统级调优实验
 
 | 天数 | 内容 | 产出 |
 |------|------|------|
-| Day 1 | `-b` batch size 扫描（64/128/256/512/1024） | 找出最优 batch size |
-| Day 2 | `-c` 上下文长度对性能的影响 | 性能-内存权衡曲线 |
-| Day 3 | `-np` 并发请求的压力测试 | 并发 vs 延迟曲线 |
-| Day 4 | 不同量化版本的性能对比 | Q4_K_M vs Q5_K_M vs Q8_0 对比 |
-| Day 5 | 总结前三周优化成果，形成最佳实践文档 | "CPU推理性能优化最佳实践" v1.0 |
+| Day 1 | NUMA 拓扑 + 绑核实验 | NUMA + taskset 数据 |
+| Day 2 | 关 NUMA balancing + CPU governor | 系统调优前后对比 |
+| Day 3 | HugePages + THP + mlock | 内存配置实验 |
+| Day 4 | `-t` 线程数扫描 | 画 "核心数 vs tokens/s" 曲线 |
+| Day 5 | `-b` batch size + `-c` 上下文扫描 | 最优参数组合 |
 
-**交付物：** 一份完备的优化配置文档。完成 L3 阶段考核。
+**交付物：** 系统参数调优对比表。
+
+#### Week 9：设计 Agent 工作流
+
+| 天数 | 内容 | 产出 |
+|------|------|------|
+| Day 1 | Agent 整体架构设计：Benchmark → Analyze → Recommend → Implement | 架构图 |
+| Day 2 | 实现 Benchmark Agent：自动跑不同参数组合 | `benchmark_agent.py` |
+| Day 3 | 实现 Analyze Agent：解析 perf 数据，定位瓶颈 | `analyze_agent.py` |
+| Day 4 | 实现 Recommend Agent：对比历史数据，给最优配置 | `recommend_agent.py` |
+| Day 5 | 串联：一次命令完成全流程调优 | `tune.py --model model.gguf` |
+
+**交付物：** 可运行的 Agent 调优工具 v1.0。
+
+Agent 工作流设计：
+
+```
+输入：模型文件 + 服务器信息
+  │
+  ▼
+┌─────────────────────────────────────────────────┐
+│ Benchmark Agent                                 │
+│ ├─ 编译选项扫描（KleidiAI on/off, BLAS on/off）    │
+│ ├─ 运行参数扫描（-t, -b, -c, -np, --mlock）       │
+│ └─ 系统参数扫描（NUMA, HugePages, governor）       │
+│     ↓                                            │
+│  每轮测试输出: tokens/s, TTFT, 内存占用, CPU%      │
+└───────────────────┬─────────────────────────────┘
+                    ▼
+┌─────────────────────────────────────────────────┐
+│ Analyze Agent                                   │
+│ ├─ 解析 perf 结果，标注 top3 瓶颈                 │
+│ ├─ roofline 分析：算力 vs 带宽                    │
+│ ├─ 对比历史数据，标记异常值                        │
+│ └─ 输出：瓶颈列表 + 数据可视化                      │
+└───────────────────┬─────────────────────────────┘
+                    ▼
+┌─────────────────────────────────────────────────┐
+│ Recommend Agent                                 │
+│ ├─ 给定约束（内存、并发要求）                      │
+│ ├─ 搜索最优配置（历史数据 + 启发式规则）            │
+│ └─ 输出：最优编译 + 运行 + 系统配置                │
+└───────────────────┬─────────────────────────────┘
+                    ▼
+输出：最优配置报告（json + markdown）
+```
+
+#### Week 10：Agent 工作流迭代
+
+| 天数 | 内容 | 产出 |
+|------|------|------|
+| Day 1 | 用 Agent 在自己的服务器上跑一次全流程 | 完整调优报告 |
+| Day 2 | 对比 Agent 推荐配置 vs 人工调优最优配置 | 差距分析 |
+| Day 3 | 优化 Agent：引入贝叶斯搜索或网格搜索策略 | 收敛速度提升 |
+| Day 4 | 支持多模型：换 Qwen2.5 等模型测试泛化性 | 跨模型验证 |
+| Day 5 | 撰写 Agent 使用文档 | README + 示例 |
+
+**交付物：** Agent 工作流 v2.0 + 多模型验证报告。完成 **目标 3**。
 
 ---
 
-### Phase 5：深度学习 — 理解内核（Week 9-10）
+### Phase 5：综合实战与总结（Week 11-12）
 
-#### Week 9：ggml 源码阅读
+#### Week 11：综合实战
 
-| 天数 | 内容 | 产出 |
-|------|------|------|
-| Day 1 | ggml 数据结构：`ggml_tensor`、`ggml_context`、`ggml_cgraph` | 画内存结构图 |
-| Day 2 | 算子的声明（ggml.h）→ 创建（ggml_*）→ 计算（ggml_compute_forward_*）流程 | 画调用链路 |
-| Day 3 | 重点看 `ggml_mul_mat`：矩阵乘法的分发策略 | 解释不同 size 走哪个内核 |
-| Day 4 | 重点看 `ggml_flash_attn_ext`：fused attention 实现 | 读代码写注释 |
-| Day 5 | 重点看 `ggml_soft_max_ext`：带 mask 的 softmax | 读代码写注释 |
+从以下题目中选一个做深度项目：
 
-**交付物：** 提交一份 ggml 核心数据流和算子体系的源码注释文档。
+**A. Unigemm 完整集成到 ggml**
+- 不只是 `ggml_mul_mat`，把 Unigemm 扩展到更多算子
+- 做充分测试覆盖，考虑作为正式 PR 提交
+- 产出：完整集成 patch + 测试报告
 
-#### Week 10：Attention 接入实验
+**B. Agent 工作流产品化**
+- 加 Web UI 展示调优结果
+- 加历史数据库，支持对比不同时间、不同模型的结果
+- 产出：产品化的调优平台
 
-| 天数 | 内容 | 产出 |
-|------|------|------|
-| Day 1 | 阅读 `build_attn_mha` 函数（`llama-graph.cpp:2066`） | 画出 attention 的图构建流程 |
-| Day 2 | 理解 `ggml_permute` 对 Q/K/V 的 layout 变换 | 写一个小程序验证 layout |
-| Day 3 | 理解 flash_attn 和 非 flash_attn 两条路径的区别 | 对比分析 |
-| Day 4 | 框架层面修改：在 `build_attn_mha` 中加入自定义分支 | 提交代码 diff |
-| Day 5 | benchmark：自定义分支 vs 原生路径的正确性与性能 | A/B 测试报告 |
-
-**交付物：** 完成一次从 "读代码 → 改代码 → 验证性能" 的完整实验循环。
-
----
-
-### Phase 6：综合实战与总结（Week 11-12）
-
-#### Week 11：综合挑战
-
-从以下题目中选一个做：
-
-**A. 编写一个 benchmark 工具**
-- 自动测试所有编译选项 × 运行参数组合
-- 输出最优配置推荐
-- 产出：可复用的 benchmark 脚本套件
-
-**B. 实现一个自定义算子接入**
-- 在 llama.cpp 中注册一个新的 ggml op
-- 产出一个端到端的 "算子开发 → 注册 → 跑通" 的 mini 工程
-
-**C. 生产环境监控方案**
-- 为 API 服务配置 Prometheus + Grafana 监控
-- 监控 tokens/s、延迟、内存、并发连接数
-- 产出：docker-compose 环境 + 仪表盘 json
+**C. 新模型适配**
+- 在鲲鹏 920F 上部署并调优另一个架构不同的模型（如 DeepSeek、Llama、ChatGLM）
+- 对比 Agent 跨模型的泛化能力
+- 产出：多模型调优对比报告
 
 #### Week 12：总结与汇报
 
 | 天数 | 内容 |
 |------|------|
 | Day 1-3 | 整理 12 周所有交付物 |
-| Day 4-5 | 写最终技术报告（含所有实验数据、结果分析） |
-| Day 6-7 | 做技术分享（25分钟演讲 + 5分钟 Q&A） |
-| Day 8 | 成果展示 + 代码 Review |
-| Day 9-10 | 填写转正面谈材料 |
+| Day 4-5 | 写最终技术报告（数据驱动、对比清晰） |
+| Day 6-7 | 技术分享（25分钟 + 5分钟 Q&A） |
+| Day 8 | 代码 Review + 成果展示 |
+| Day 9-10 | 转正面谈准备 |
 
-**最终交付物：** 技术报告、代码贡献、Benchmark 数据仪表盘、转正申请。
+**最终交付物：** 技术报告 + 代码贡献 + Agent 工作流 + 转正申请。
 
 ---
 
 ## 三、考核标准
 
-| 等级 | 标准 | 对应阶段 |
-|------|------|---------|
-| **L2 通过** | 能独立完成部署，理解每一步在做什么 | Phase 1-2 |
-| **L3 通过** | 能独立做性能分析和优化，产出数据驱动的决策 | Phase 3-4 |
-| **L4 通过** | 能修改框架代码，理解核心算子的实现原理 | Phase 5-6 |
+### 🎯 目标 1：在鲲鹏 920F 上跑通（Week 4 末）
 
-### L2 考核（Week 4 末）
-
-现场实操题（30分钟）：
-1. 在鲲鹏服务器上从零编译 llama.cpp
+现场实操（30 分钟）：
+1. 从零编译 llama.cpp
 2. 启动 API 服务
-3. 用 curl 发送一次对话请求
+3. curl 发起一次对话
 4. 说出当前 tokens/s
 5. 解释部署过程中的三个关键决策
 
-### L3 考核（Week 8 末）
+### 🎯 目标 2：Unigemm 调优（Week 7 末）
 
-案例分析题：
-给定一台新配置的 ARM 服务器，跑模型只有 2 tok/s。要求：
-1. 用 perf/htop/llama-perf 定位问题
-2. 给出优化方案
+案例分析 + 实操：
+1. 解释 ggml_mul_mat 的 dispatch 链路
+2. 展示 Unigemm 接入的代码 diff
+3. 给出接入前后的性能对比数据
+4. 解释为什么 Unigemm 更快（从 I8MM 指令角度）
 
-### L4 考核（Week 12 末）
+### 🎯 目标 3：Agent 工作流（Week 10 末）
 
-技术改造题：
-要求修改 llama.cpp 源码，在 attention 路径中加入一个自定义操作，验证正确性和性能。
+演示：
+1. 一条命令完成全流程调优
+2. Agent 自动发现至少一个"人工没想到"的优化点
+3. 输出结构化的调优报告
 
 ---
 
-## 四、资源清单
+## 四、预期收益
 
-### 必读文档（本仓库）
+### 推理速度（Qwen3.6-35B-A3B, UD-Q4_K_M, 鲲鹏 920F）
 
-| 文档 | 用途 |
+| 阶段 | tokens/s | 累计提升 |
+|------|---------|---------|
+| 原生编译 + 默认参数 | ~5 | — |
+| + KleidiAI / OpenBLAS | ~7 | +40% |
+| + 系统调优（NUMA + HugePages + 绑核） | ~9 | +80% |
+| + 最优运行参数 | ~10 | +100% |
+| **+ Unigemm（预期）** | **~12-14** | **+140~180%** |
+| **+ Agent 自动搜索最优组合** | **逼近硬件上限** | **自动化 + 可复现** |
+
+> Unigemm 的收益预期基于：矩阵乘法占推理 ~60% 时间，鲲鹏数学库相对通用 NEON 内核的 1.5-2x 加速。实际需要实验验证。
+
+### Agent 工作流收益
+
+| 指标 | 人工调优 | Agent 调优 |
+|------|---------|-----------|
+| 一次全流程调优耗时 | 2-3 天 | 2-3 小时 |
+| 参数覆盖面 | 10-20 组 | 100+ 组 |
+| 可复现性 | 低（人的记忆） | 高（commit history） |
+| 最佳配置发现 | 依赖经验 | 数据驱动 |
+| 换模型后的迁移成本 | 重新试一遍 | 换行命令 |
+
+---
+
+## 五、资源清单
+
+### 本仓库
+
+| 文件 | 用途 |
 |------|------|
-| `DEPLOY.md` | 部署实操参考 |
-| `download-model.sh` | 模型下载脚本 |
+| `DEPLOY.md` | 部署实操 |
+| `download-model.sh` | 模型下载 |
 | `llama.cpp/` | 完整源码 |
 
-### 推荐阅读
+### 必读资料
 
-| 材料 | 优先级 |
+| 材料 | 优先级 | 对应目标 |
+|------|--------|---------|
+| [Attention Is All You Need](https://arxiv.org/abs/1706.03762) | ⭐ | 目标 1 |
+| [llama.cpp 源码](https://github.com/ggerganov/llama.cpp) | ⭐ | 目标 1 |
+| [KML 鲲鹏数学库文档](https://www.hikunpeng.com/developer/hpc/kml) | ⭐ | 目标 2 |
+| [Unigemm API 说明](https://support.huawei.com/enterprise/zh/doc/EDOC1100283144) | ⭐ | 目标 2 |
+| [ARM NEON I8MM 指令集](https://developer.arm.com/architectures/instruction-sets/intrinsics/) | ⭐ | 目标 2 |
+| [鲲鹏 920 架构分析](https://chipsandcheese.com/p/huaweis-kunpeng-920-and-taishan-v110) | 🟡 | 目标 1 |
+| [KleidiAI 文档](https://github.com/ARM-software/kleidiai) | 🟡 | 目标 1 |
+| [Linux perf 教程](https://perf.wiki.kernel.org/) | 🟡 | 目标 3 |
+| [llama.cpp MoE 优化讨论](https://github.com/ggml-org/llama.cpp/issues/17936) | 🟢 | 目标 1 |
+
+---
+
+## 六、导师指引
+
+### 三条目标的优先级关系
+
+```
+目标 1（跑通）── 硬性前置，第 4 周必须完成
+     │
+     ▼
+目标 2（Unigemm）── 核心技术难点，第 5-7 周攻坚
+     │  真正的价值在"能不能把华为自己的数学库用上"
+     ▼
+目标 3（Agent）── 工程能力，第 8-10 周构建
+    把前两个目标的经验沉淀为自动化工具
+```
+
+### 导师每周检查清单
+
+| 周次 | 检查点 |
 |------|--------|
-| [Attention Is All You Need](https://arxiv.org/abs/1706.03762) | ⭐ 必读 |
-| [llama.cpp README](https://github.com/ggerganov/llama.cpp) | ⭐ 必读 |
-| [llama.cpp build options](https://github.com/ggerganov/llama.cpp#build) | ⭐ 必读 |
-| [Qwen3 官方文档](https://qwen.readthedocs.io/en/latest/) | ⭐ 必读 |
-| [GGML 源码导读](https://github.com/ggml-org/ggml) | ⭐ 必读 |
-| [ARM NEON 编程指南](https://developer.arm.com/architectures/instruction-sets/intrinsics/) | 🟡 选读 |
-| [KleidiAI 文档](https://github.com/ARM-software/kleidiai) | 🟡 选读 |
-| [Linux perf 教程](https://perf.wiki.kernel.org/) | 🟡 选读 |
-| [HugePages 说明](https://www.kernel.org/doc/html/latest/admin-guide/mm/hugetlbpage.html) | 🟢 参考 |
-
-### 常用命令速查
-
-```bash
-# 性能
-./bin/llama-cli -m model.gguf -p "test" -n 128 --perf
-perf stat -e cache-misses,instructions,cycles ./bin/llama-cli ...
-htop
-
-# 系统调优
-echo 0 > /proc/sys/kernel/numa_balancing
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-
-# 内存
-free -h
-cat /proc/meminfo | grep HugePages
-```
+| 1-2 | 技术笔记质量？硬件拓扑报告是否完整？ |
+| 3 | 编译是否顺利？是否记录了每一步的输出？ |
+| 4 | 服务是否稳定？代码质量如何？ |
+| 5 | ggml 源码理解到什么程度？ |
+| 6 | Unigemm 调用是否成功？benchmark 方法是否合理？ |
+| 7 | 接入方案设计是否稳健？收益量化是否可信？ |
+| 8 | 系统调优实验是否控制变量？数据是否可复现？ |
+| 9 | Agent 架构设计是否合理？ |
+| 10 | Agent 是否真的发现了"人不知道"的最优配置？ |
+| 11 | 综合项目的深度和质量？ |
+| 12 | 技术报告的数据是否扎实？表达是否清晰？ |
 
 ---
 
-## 五、文档模板
-
-### 每周周报模板
-
-```markdown
-# Week X 周报 - 实习生姓名
-
-## 本周完成
-- [ ] 事项 1
-- [ ] 事项 2
-
-## 关键数据
-- tokens/s: X.XX
-- 瓶颈: ...
-
-## 遇到的问题
-- 问题 1 + 解决方案
-- 问题 2 + 解决方案
-
-## 下周计划
-- [ ] 事项 1
-- [ ] 事项 2
-```
-
-### 实验报告模板
-
-```markdown
-# 实验：编译选项对性能的影响
-
-## 实验目的
-...
-
-## 实验环境
-- 机器：鲲鹏920, 128GB
-- 模型：Qwen3.6-35B-A3B-UD-Q4_K_M
-
-## 控制变量
-- ...
-
-## 对比项
-| 配置 | tokens/s | 首次延迟 | 内存占用 |
-|------|---------|---------|---------|
-| A | X | Yms | ZGB |
-| B | X | Yms | ZGB |
-
-## 结论
-...
-
-## 复现步骤
-```bash
-cmake ... && make ...
-./bin/llama-cli ...
-```
-```
-
----
-
-## 六、导师职责
-
-- **每周 1 次 1on1（30 分钟）**：检查进度、解答问题
-- **每两周 1 次代码 review**：验收代码质量
-- **每次实验前要求写实验设计**：不允许"试一下看结果"
-- **结果必须量化**：不说"变快了"，说"从 5.2tok/s 提升到 7.8tok/s，+50%"
-- **鼓励问"为什么"**：每个答案都要追到源码级
-
----
-
-## 七、常用术语表
+## 七、术语表
 
 | 术语 | 说明 |
 |------|------|
-| MoE | Mixture of Experts，混合专家模型，Qwen3.6-35B-A3B 用的架构 |
-| GGUF | llama.cpp 的模型格式，单一文件，支持量化 |
-| Q4_K_M | 4-bit 量化，K 表示关键层保留精度，M 表示中等质量 |
-| KleidiAI | ARM 官方提供的机器学习加速库 |
-| NEON | ARM 架构的 SIMD 指令集，鲲鹏920支持 |
-| NUMA | Non-Uniform Memory Access，多路服务器的内存架构 |
-| HugePages | 大页内存，减少 TLB miss |
-| KV Cache | 缓存 attention 中的 Key/Value 矩阵 |
+| 鲲鹏 920F | 华为 7nm ARM 服务器芯片，64核 ARMv8.2，8通道 DDR4 |
+| NEON | ARM 架构 SIMD 指令集，128-bit 向量处理器 |
+| I8MM | ARMv8.2 的 INT8 矩阵乘累加指令，用于量化推理加速 |
+| KML | Kunpeng Math Library，华为鲲鹏数学库 |
+| Unigemm | KML 的核心组件，针对鲲鹏深度优化的通用矩阵乘法 |
+| Unigemm | 统一矩阵乘（Universal GEMM），支持多种数据类型和布局 |
+| roofline model | 性能分析模型，判断当前瓶颈在算力还是带宽 |
+| Agent Workflow | 用 LLM Agent 驱动的自动化调优流水线 |
